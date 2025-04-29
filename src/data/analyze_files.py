@@ -19,8 +19,8 @@ import json
 sdk = initialize_sdk()
 model = sdk.models.completions("yandexgpt", model_version="rc")
 
-# Оптимальный размер чанка (примерно 2000 токенов)
-CHUNK_SIZE = 2000 * 2  # 2000 токенов * 2 символа/токен
+# Оптимальный размер чанка (1000 токенов)
+CHUNK_SIZE = 1000 * 2  # 1000 токенов * 2 символа/токен
 
 def get_token_count(filename):
     """Подсчёт количества токенов в файле"""
@@ -90,8 +90,8 @@ def create_search_index(files, index_name):
         files,
         index_type=HybridSearchIndexType(
             chunking_strategy=StaticIndexChunkingStrategy(
-                max_chunk_size_tokens=2000,
-                chunk_overlap_tokens=200
+                max_chunk_size_tokens=1000,
+                chunk_overlap_tokens=100
             ),
             combination_strategy=ReciprocalRankFusionIndexCombinationStrategy(),
         ),
@@ -101,17 +101,16 @@ def create_search_index(files, index_name):
     
     return index
 
-def get_wine_list():
+def get_chat_files():
     """Получение списка всех чатов"""
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     data_dir = os.path.join(project_root, "data")
     
-    wines = []
-    for fn in glob(os.path.join(data_dir, "*", "*.md")):
+    files = []
+    for fn in glob(os.path.join(data_dir, "chats", "*.md")):
         if os.path.isfile(fn):
-            wine_name = os.path.splitext(os.path.basename(fn))[0]
-            wines.append(wine_name)
-    return sorted(wines)
+            files.append(fn)
+    return sorted(files)
 
 def analyze_files():
     """Анализ всех .md файлов в директории data"""
@@ -133,10 +132,10 @@ def analyze_files():
     return pd.DataFrame(d)
 
 if __name__ == "__main__":
-    # Вывод списка чат
+    # Вывод списка чатов
     print("\nСписок чатов:")
-    for wine in get_wine_list():
-        print(f"- {wine}")
+    for file in get_chat_files():
+        print(f"- {file}")
     
     # Анализ файлов
     df = analyze_files()
@@ -157,11 +156,15 @@ if __name__ == "__main__":
         
         # Создание индексов для групп файлов
         indices = {}
-        for year in [2021, 2022, 2023, 2024]:
-            year_files = df[df["File"].str.contains(str(year))]["Uploaded"].explode()
-            if not year_files.empty:
-                index = create_search_index(year_files, f"index_{year}")
-                indices[str(year)] = index.id
+        all_chunks = df["Uploaded"].explode()
+        chunk_count = len(all_chunks)
+        
+        # Разбиваем чанки на группы по 90 файлов (оставляем запас)
+        chunk_groups = [all_chunks[i:i+90] for i in range(0, chunk_count, 90)]
+        
+        for i, group in enumerate(chunk_groups):
+            index = create_search_index(group, f"index_{i+1}")
+            indices[str(i+1)] = index.id
         
         # Сохранение ID индексов
         with open("indices.json", "w") as f:
