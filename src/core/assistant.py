@@ -3,9 +3,10 @@
 """
 
 from ..utils.config import load_config
-from .sdk import initialize_sdk, create_thread, create_assistant
+from .sdk import initialize_sdk, create_thread, create_assistant, SearchAdmissionInfo, Handover
+import time
 
-class WineAssistant:
+class AdmissionsAssistant:
     def __init__(self):
         self.config = load_config()
         self.sdk = initialize_sdk()
@@ -26,6 +27,35 @@ class WineAssistant:
         self.thread.write(question)
         run = self.assistant.run(self.thread)
         result = run.wait()
+        
+        # Обработка вызовов функций
+        if result.tool_calls:
+            tool_results = []
+            for tool_call in result.tool_calls:
+                print(f"Обработка вызова функции: {tool_call.function.name}")
+                
+                if tool_call.function.name == "SearchAdmissionInfo":
+                    # Обработка поиска информации о поступлении
+                    search_params = SearchAdmissionInfo.model_validate(tool_call.function.arguments)
+                    # TODO: Реализовать поиск по базе данных
+                    tool_results.append({
+                        "name": tool_call.function.name,
+                        "content": f"Найдена информация по запросу: {search_params.query}"
+                    })
+                
+                elif tool_call.function.name == "Handover":
+                    # Обработка передачи оператору
+                    handover_params = Handover.model_validate(tool_call.function.arguments)
+                    tool_results.append({
+                        "name": tool_call.function.name,
+                        "content": handover_params.process(self.thread)
+                    })
+            
+            # Отправляем результаты выполнения функций
+            run.submit_tool_results(tool_results)
+            time.sleep(1)  # Даем время на обработку
+            result = run.wait()
+            
         return result.text
         
     def cleanup(self):
@@ -36,7 +66,7 @@ class WineAssistant:
             self.assistant.delete()
 
 if __name__ == "__main__":
-    assistant = WineAssistant()
+    assistant = AdmissionsAssistant()
     print(assistant.start())
     print("Введите вопрос (или 'exit' для выхода):")
     while True:

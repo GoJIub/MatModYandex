@@ -13,15 +13,24 @@ from yandex_cloud_ml_sdk.search_indexes import (
     ReciprocalRankFusionIndexCombinationStrategy,
 )
 import os
+import json
 
 # Инициализация SDK для токенизации
 sdk = initialize_sdk()
 model = sdk.models.completions("yandexgpt", model_version="rc")
 
+# Оптимальный размер чанка (примерно 2000 токенов)
+CHUNK_SIZE = 2000 * 2  # 2000 токенов * 2 символа/токен
+
 def get_token_count(filename):
     """Подсчёт количества токенов в файле"""
     with open(filename, "r", encoding="utf8") as f:
-        return len(model.tokenize(f.read()))
+        content = f.read()
+        tokens = len(model.tokenize(content))
+        chars = len(content)
+        ratio = chars / tokens
+        print(f"{os.path.basename(filename)}: {tokens} токенов, {ratio:.2f} chars/token")
+        return tokens
 
 def get_file_len(filename):
     """Подсчёт количества символов в файле"""
@@ -29,36 +38,71 @@ def get_file_len(filename):
         l = len(f.read())
     return l
 
-def upload_file(filename):
-    """Загрузка файла в облако"""
-    return sdk.files.upload(filename, ttl_days=1, expiration_policy="static")
-
-def create_search_index(df):
-    """Создание поискового индекса"""
-    print("\nСоздание поискового индекса...")
+def chunk_and_upload_file(filename):
+    """Разбиение файла на чанки и загрузка в облако"""
+    with open(filename, "r", encoding="utf-8") as f:
+        content = f.read()
     
-    # Создаем индекс для вин
+    # Разбиваем на строки
+    lines = content.split("\n")
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    for line in lines:
+        line_size = len(line)
+        if current_size + line_size > CHUNK_SIZE:
+            # Загружаем текущий чанк
+            chunk_content = "\n".join(current_chunk)
+            chunk_id = sdk.files.upload_bytes(
+                chunk_content.encode(),
+                ttl_days=1,
+                expiration_policy="static",
+                mime_type="text/markdown"
+            )
+            chunks.append(chunk_id)
+            
+            # Начинаем новый чанк
+            current_chunk = [line]
+            current_size = line_size
+        else:
+            current_chunk.append(line)
+            current_size += line_size
+    
+    # Загружаем последний чанк, если он не пустой
+    if current_chunk:
+        chunk_content = "\n".join(current_chunk)
+        chunk_id = sdk.files.upload_bytes(
+            chunk_content.encode(),
+            ttl_days=1,
+            expiration_policy="static",
+            mime_type="text/markdown"
+        )
+        chunks.append(chunk_id)
+    
+    return chunks
+
+def create_search_index(files, index_name):
+    """Создание поискового индекса для группы файлов"""
+    print(f"\nСоздание поискового индекса {index_name}...")
+    
     op = sdk.search_indexes.create_deferred(
-        df[df["Category"] == "wines"]["Uploaded"],
+        files,
         index_type=HybridSearchIndexType(
             chunking_strategy=StaticIndexChunkingStrategy(
-                max_chunk_size_tokens=1000, chunk_overlap_tokens=100
+                max_chunk_size_tokens=2000,
+                chunk_overlap_tokens=200
             ),
             combination_strategy=ReciprocalRankFusionIndexCombinationStrategy(),
         ),
     )
     index = op.wait()
-    print("Индекс для вин создан!")
-    
-    # Добавляем файлы регионов
-    op = index.add_files_deferred(df[df["Category"]=="regions"]["Uploaded"])
-    xfiles = op.wait()
-    print("Файлы регионов добавлены в индекс!")
+    print(f"Индекс {index_name} создан!")
     
     return index
 
 def get_wine_list():
-    """Получение списка всех вин"""
+    """Получение списка всех чатов"""
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     data_dir = os.path.join(project_root, "data")
     
@@ -75,6 +119,7 @@ def analyze_files():
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     data_dir = os.path.join(project_root, "data")
     
+    print("\nАнализ соотношения токенов и символов:")
     d = [
         {
             "File": fn,
@@ -88,8 +133,8 @@ def analyze_files():
     return pd.DataFrame(d)
 
 if __name__ == "__main__":
-    # Вывод списка вин
-    print("\nСписок вин:")
+    # Вывод списка чат
+    print("\nСписок чатов:")
     for wine in get_wine_list():
         print(f"- {wine}")
     
@@ -102,18 +147,23 @@ if __name__ == "__main__":
         print(df)
         print(df.groupby("Category").agg({"Tokens": ("min", "mean", "max")}))
         
-        # Загрузка файлов в облако
-        print("\nЗагрузка файлов в облако...")
-        df["Uploaded"] = df["File"].apply(upload_file)
-        print("\nЗагруженные файлы:")
+        # Загрузка файлов в облако с чанкованием
+        print("\nЗагрузка файлов в облако с чанкованием...")
+        df["Uploaded"] = df["File"].apply(chunk_and_upload_file)
+        print("\nЗагруженные чанки:")
         for _, row in df.iterrows():
-            print(f"- {row['File']} -> {row['Uploaded'].id}")
+            print(f"- {row['File']} -> {len(row['Uploaded'])} чанков")
         print("Файлы загружены!")
         
-        # Создание поискового индекса
-        index = create_search_index(df)
-        print(f"\nИндекс создан с ID: {index.id}")
+        # Создание индексов для групп файлов
+        indices = {}
+        for year in [2021, 2022, 2023, 2024]:
+            year_files = df[df["File"].str.contains(str(year))]["Uploaded"].explode()
+            if not year_files.empty:
+                index = create_search_index(year_files, f"index_{year}")
+                indices[str(year)] = index.id
         
-        # Сохранение ID индекса
-        save_search_index_id(index.id)
-        print("ID индекса сохранен в конфигурации")
+        # Сохранение ID индексов
+        with open("indices.json", "w") as f:
+            json.dump(indices, f)
+        print("\nID индексов сохранены в indices.json")
