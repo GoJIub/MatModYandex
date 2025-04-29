@@ -5,15 +5,16 @@
 from ..utils.sdk_init import initialize_sdk
 from ..utils.config import load_config
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import Optional
 from yandex_cloud_ml_sdk.search_indexes import (
     StaticIndexChunkingStrategy,
     HybridSearchIndexType,
     ReciprocalRankFusionIndexCombinationStrategy,
 )
-import json
+from dotenv import load_dotenv
 import os
-import pandas as pd
+
+load_dotenv()
 
 class SearchAdmissionInfo(BaseModel):
     """Поиск информации о поступлении"""
@@ -39,15 +40,10 @@ def create_assistant(sdk, thread):
     config = load_config()
     model = sdk.models.completions("yandexgpt", model_version="rc")
     
-    # Загружаем ID индексов
-    indices = {}
-    if os.path.exists("indices.json"):
-        with open("indices.json", "r") as f:
-            indices = json.load(f)
+    # Загружаем ID индекса из .env
+    index_id = os.getenv("SEARCH_INDEX_ID")
     
-    if indices:
-        # Берем первый индекс для начальной конфигурации
-        index_id = list(indices.values())[0]
+    if index_id:
         print(f"\nАссистент использует индекс: {index_id}")
         
         # Получаем индекс
@@ -112,39 +108,6 @@ def create_assistant(sdk, thread):
     
     return assistant
 
-def get_search_tools(sdk) -> List[Dict]:
-    """Получение всех поисковых инструментов"""
-    if not os.path.exists("indices.json"):
-        return []
-        
-    with open("indices.json", "r") as f:
-        indices = json.load(f)
-    
-    search_tools = []
-    for index_id in indices.values():
-        index = sdk.search_indexes.get(index_id)
-        search_tools.append(sdk.tools.search_index(index))
-    
-    return search_tools
-
-def get_next_index(sdk, current_index_id: str) -> str:
-    """Получение следующего индекса"""
-    if not os.path.exists("indices.json"):
-        return None
-        
-    with open("indices.json", "r") as f:
-        indices = json.load(f)
-    
-    index_ids = list(indices.values())
-    try:
-        current_pos = index_ids.index(current_index_id)
-        if current_pos + 1 < len(index_ids):
-            return index_ids[current_pos + 1]
-    except ValueError:
-        pass
-    
-    return None
-
 def print_citations(result):
     """Вывод источников информации из ответа ассистента"""
     for citation in result.citations:
@@ -152,4 +115,41 @@ def print_citations(result):
             if source.type != "filechunk":
                 continue
             print("------------------------")
-            print(source.parts[0]) 
+            print(source.parts[0])
+
+def search_admissions_info(sdk, query: str) -> list:
+    """Поиск информации о поступлении"""
+    try:
+        # Получаем ID индекса из переменных окружения
+        index_id = os.getenv("SEARCH_INDEX_ID")
+        if not index_id:
+            print("Ошибка: SEARCH_INDEX_ID не найден в переменных окружения")
+            return []
+            
+        # Получаем индекс
+        index = sdk.search_indexes.get(index_id)
+        if not index:
+            print(f"Ошибка: индекс {index_id} не найден")
+            return []
+            
+        # Выполняем поиск
+        search_results = index.search(
+            query=query,
+            limit=5,
+            score_threshold=0.5
+        )
+        
+        # Форматируем результаты
+        results = []
+        for result in search_results:
+            results.append({
+                "text": result.text,
+                "score": result.score,
+                "metadata": result.metadata
+            })
+            
+        return results
+        
+    except Exception as e:
+        print(f"Ошибка при поиске: {e}")
+        return []

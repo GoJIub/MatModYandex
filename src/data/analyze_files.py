@@ -13,7 +13,7 @@ from yandex_cloud_ml_sdk.search_indexes import (
     ReciprocalRankFusionIndexCombinationStrategy,
 )
 import os
-import json
+from dotenv import set_key
 
 # Инициализация SDK для токенизации
 sdk = initialize_sdk()
@@ -43,37 +43,58 @@ def chunk_and_upload_file(filename):
     with open(filename, "r", encoding="utf-8") as f:
         content = f.read()
     
-    # Разбиваем на строки
+    # Пропускаем заголовок и начало таблицы
     lines = content.split("\n")
+    if lines[0].startswith("#"):
+        year = lines[0].strip("#").strip()
+        lines = lines[1:]
+    else:
+        year = "unknown"
+        
+    if lines[0].startswith("| Вопросы | Ответы |"):
+        lines = lines[2:]  # Пропускаем заголовок таблицы и разделитель
+    
+    # Разбиваем на диалоги
     chunks = []
-    current_chunk = []
-    current_size = 0
     
     for line in lines:
-        line_size = len(line)
-        if current_size + line_size > CHUNK_SIZE:
-            # Загружаем текущий чанк
-            chunk_content = "\n".join(current_chunk)
-            chunk_id = sdk.files.upload_bytes(
-                chunk_content.encode(),
-                ttl_days=1,
-                expiration_policy="static",
-                mime_type="text/markdown"
-            )
-            chunks.append(chunk_id)
+        if not line.strip():  # Пропускаем пустые строки
+            continue
             
-            # Начинаем новый чанк
-            current_chunk = [line]
-            current_size = line_size
+        # Разделяем строку на вопрос и ответ
+        parts = line.split("|")
+        if len(parts) < 4:  # Пропускаем некорректные строки
+            continue
+            
+        # Извлекаем ID и дату из вопроса
+        question_parts = parts[1].strip().split("<br>")
+        if len(question_parts) > 1:
+            metadata = question_parts[0].strip()
+            question = question_parts[1].strip()
         else:
-            current_chunk.append(line)
-            current_size += line_size
-    
-    # Загружаем последний чанк, если он не пустой
-    if current_chunk:
-        chunk_content = "\n".join(current_chunk)
+            metadata = ""
+            question = parts[1].strip()
+            
+        # Извлекаем ID и дату из ответа
+        answer_parts = parts[2].strip().split("<br>")
+        if len(answer_parts) > 1:
+            answer_metadata = answer_parts[0].strip()
+            answer = answer_parts[1].strip()
+        else:
+            answer_metadata = ""
+            answer = parts[2].strip()
+        
+        # Форматируем диалог с метаданными
+        dialog = f"""Год: {year}
+Вопрос ({metadata}):
+{question}
+
+Ответ ({answer_metadata}):
+{answer}"""
+        
+        # Загружаем каждый диалог как отдельный чанк
         chunk_id = sdk.files.upload_bytes(
-            chunk_content.encode(),
+            dialog.encode(),
             ttl_days=1,
             expiration_policy="static",
             mime_type="text/markdown"
@@ -82,12 +103,17 @@ def chunk_and_upload_file(filename):
     
     return chunks
 
-def create_search_index(files, index_name):
-    """Создание поискового индекса для группы файлов"""
-    print(f"\nСоздание поискового индекса {index_name}...")
+def create_and_populate_search_index(chunks, index_name, batch_size=100):
+    """Создание поискового индекса и добавление чанков пакетами"""
+    if not chunks:
+        raise ValueError("No chunks provided for indexing")
     
+    print(f"\nСоздание поискового индекса...")
+    
+    # Создаем индекс с первым пакетом чанков (до batch_size)
+    initial_batch = chunks[:batch_size]
     op = sdk.search_indexes.create_deferred(
-        files,
+        initial_batch,
         index_type=HybridSearchIndexType(
             chunking_strategy=StaticIndexChunkingStrategy(
                 max_chunk_size_tokens=1000,
@@ -97,8 +123,17 @@ def create_search_index(files, index_name):
         ),
     )
     index = op.wait()
-    print(f"Индекс {index_name} создан!")
+    print(f"Индекс {index_name} создан с первым пакетом ({len(initial_batch)} чанков)!")
     
+    # Добавляем оставшиеся чанки пакетами
+    for i in range(batch_size, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
+        print(f"Добавление пакета {(i//batch_size) + 1} ({len(batch)} чанков)...")
+        op = index.add_files_deferred(batch)
+        op.wait()
+        print(f"Пакет {(i//batch_size) + 1} добавлен!")
+    
+    print(f"Индекс {index_name} полностью заполнен!")
     return index
 
 def get_chat_files():
@@ -154,19 +189,11 @@ if __name__ == "__main__":
             print(f"- {row['File']} -> {len(row['Uploaded'])} чанков")
         print("Файлы загружены!")
         
-        # Создание индексов для групп файлов
-        indices = {}
-        all_chunks = df["Uploaded"].explode()
-        chunk_count = len(all_chunks)
+        # Создание и заполнение индекса
+        all_chunks = df["Uploaded"].explode().tolist()
+        index = create_and_populate_search_index(all_chunks, f"index_1")
         
-        # Разбиваем чанки на группы по 90 файлов (оставляем запас)
-        chunk_groups = [all_chunks[i:i+90] for i in range(0, chunk_count, 90)]
-        
-        for i, group in enumerate(chunk_groups):
-            index = create_search_index(group, f"index_{i+1}")
-            indices[str(i+1)] = index.id
-        
-        # Сохранение ID индексов
-        with open("indices.json", "w") as f:
-            json.dump(indices, f)
-        print("\nID индексов сохранены в indices.json")
+        # Сохранение ID индекса в .env
+        env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
+        set_key(env_file, "SEARCH_INDEX_ID", index.id)
+        print("\nID индекса сохранён в .env")
