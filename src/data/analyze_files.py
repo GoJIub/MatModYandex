@@ -43,6 +43,60 @@ def chunk_and_upload_file(filename):
     with open(filename, "r", encoding="utf-8") as f:
         content = f.read()
     
+    # Определяем тип файла по пути
+    if "facts" in filename:
+        return chunk_and_upload_facts(content)
+    else:
+        return chunk_and_upload_chats(content)
+
+def chunk_and_upload_facts(content):
+    """Разбиение файла с фактами на чанки и загрузка в облако"""
+    chunks = []
+    
+    # Пропускаем заголовок
+    lines = content.split("\n")
+    if lines[0].startswith("#"):
+        lines = lines[1:]
+    
+    # Пропускаем заголовок таблицы и разделитель
+    if lines[0].startswith("|"):
+        lines = lines[2:]
+    
+    # Обрабатываем каждую строку таблицы
+    for line in lines:
+        if not line.strip() or not line.startswith("|"):
+            continue
+            
+        # Разделяем строку на ячейки
+        cells = [cell.strip() for cell in line.split("|")[1:-1]]
+        
+        # Создаем чанк для каждой непустой ячейки
+        for i, cell in enumerate(cells):
+            if not cell:
+                continue
+                
+            # Определяем категорию по позиции
+            categories = ["Учебный процесс", "Инфраструктура", "Студенческая жизнь", 
+                        "История и уникальность", "Международные возможности"]
+            category = categories[i] if i < len(categories) else "Другое"
+            
+            # Форматируем факт
+            fact = f"""Категория: {category}
+Факт: {cell}"""
+            
+            # Загружаем чанк
+            chunk_id = sdk.files.upload_bytes(
+                fact.encode(),
+                ttl_days=1,
+                expiration_policy="static",
+                mime_type="text/markdown"
+            )
+            chunks.append(chunk_id)
+    
+    return chunks
+
+def chunk_and_upload_chats(content):
+    """Разбиение файла с чатами на чанки и загрузка в облако"""
     # Пропускаем заголовок и начало таблицы
     lines = content.split("\n")
     if lines[0].startswith("#"):
@@ -136,19 +190,24 @@ def create_and_populate_search_index(chunks, index_name, batch_size=100):
     print(f"Индекс {index_name} полностью заполнен!")
     return index
 
-def get_chat_files():
-    """Получение списка всех чатов"""
+def get_files():
+    """Получение списка всех файлов для анализа"""
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     data_dir = os.path.join(project_root, "data")
     
     files = []
+    # Добавляем файлы из директории chats
     for fn in glob(os.path.join(data_dir, "chats", "*.md")):
+        if os.path.isfile(fn):
+            files.append(fn)
+    # Добавляем файлы из директории facts
+    for fn in glob(os.path.join(data_dir, "facts", "*.md")):
         if os.path.isfile(fn):
             files.append(fn)
     return sorted(files)
 
 def analyze_files():
-    """Анализ всех .md файлов в директории data"""
+    """Анализ всех .md файлов в директориях data/chats и data/facts"""
     # Получаем путь к корню проекта
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     data_dir = os.path.join(project_root, "data")
@@ -167,15 +226,15 @@ def analyze_files():
     return pd.DataFrame(d)
 
 if __name__ == "__main__":
-    # Вывод списка чатов
-    print("\nСписок чатов:")
-    for file in get_chat_files():
+    # Вывод списка файлов
+    print("\nСписок файлов для обработки:")
+    for file in get_files():
         print(f"- {file}")
     
     # Анализ файлов
     df = analyze_files()
     if df.empty:
-        print("\nФайлы не найдены. Проверьте путь к директории data.")
+        print("\nФайлы не найдены. Проверьте пути к директориям data/chats и data/facts.")
     else:
         print("\nРезультаты анализа файлов:")
         print(df)
