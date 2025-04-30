@@ -29,11 +29,10 @@ class AdmissionsAssistant:
         
     def ask(self, question: str) -> str:
         """Задать вопрос ассистенту"""
+        if not self.thread or not self.assistant:
+            self.start()  # Инициализируем ассистента, если он еще не создан
+        
         try:
-            # Создаем новый поток для каждого запроса
-            logger.info("[DEBUG] Создание нового потока для запроса")
-            self.thread = create_thread(self.sdk)
-            
             # Задаем вопрос
             logger.info(f"Отправка вопроса ассистенту: {question}")
             self.thread.write(question)

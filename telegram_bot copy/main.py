@@ -118,13 +118,8 @@ def start_message(message):
 def stop_command(message):
     """Обработчик команды /stop для завершения диалога"""
     logger.info(f"User {message.chat.id} ({message.chat.username}) requested to stop dialog")
-    visavi = get_visavi(message.chat.id)
-    if visavi:
-        # Отправляем сообщение админу
-        bot.send_message(visavi, "Диалог завершен. Спасибо за обращение!")
-        # Отправляем сообщение пользователю
-        bot.send_message(message.chat.id, "Диалог завершен")
-        stop_dialog(message.chat.id)
+    if stop_dialog(message.chat.id):
+        bot.send_message(message.chat.id, "Диалог завершен. Спасибо за обращение!")
     else:
         bot.send_message(message.chat.id, "Вы не находитесь в активном диалоге.")
 

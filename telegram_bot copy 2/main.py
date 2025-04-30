@@ -62,7 +62,6 @@ logger.info("Инициализация бота...")
 bot = telebot.TeleBot(BOT_TOKEN)
 assistants = {}  # Словарь для хранения ассистентов для каждого пользователя
 calling_admin = dict()
-chat_history = {}  # Словарь для хранения истории чатов
 logger.info(f"Инициализация завершена: {time.time() - start_time:.2f} сек")
 
 # Устанавливаем экземпляр бота для класса Handover
@@ -118,13 +117,8 @@ def start_message(message):
 def stop_command(message):
     """Обработчик команды /stop для завершения диалога"""
     logger.info(f"User {message.chat.id} ({message.chat.username}) requested to stop dialog")
-    visavi = get_visavi(message.chat.id)
-    if visavi:
-        # Отправляем сообщение админу
-        bot.send_message(visavi, "Диалог завершен. Спасибо за обращение!")
-        # Отправляем сообщение пользователю
-        bot.send_message(message.chat.id, "Диалог завершен")
-        stop_dialog(message.chat.id)
+    if stop_dialog(message.chat.id):
+        bot.send_message(message.chat.id, "Диалог завершен. Спасибо за обращение!")
     else:
         bot.send_message(message.chat.id, "Вы не находитесь в активном диалоге.")
 
@@ -175,73 +169,159 @@ def message_reply(message):
             bot.send_message(message.chat.id, "Ошибка авторизации. Попробуйте позже.")
         return
     
+    # Проверяем, является ли сообщение запросом на связь с админом
+    if message.text.lower() in ['позови админа', 'связаться с админом', 'нужен админ']:
+        try:
+            logger.info(f"Начало обработки запроса на передачу оператору от пользователя {message.chat.id}")
+            # Получаем ассистента и вызываем функцию handover_to_operator
+            logger.info("Получение ассистента...")
+            assistant = get_or_create_assistant(message.chat.id)
+            logger.info("Ассистент получен, отправка запроса...")
+            response = assistant.ask("Пожалуйста, передай мой запрос оператору приёмной комиссии.")
+            logger.info(f"Получен ответ от ассистента: {response}")
+            
+            # Проверяем, является ли ответ вызовом функции
+            if isinstance(response, dict) and 'function_call' in response:
+                function_call = response['function_call']
+                logger.info(f"Обработка вызова функции: {function_call}")
+                if function_call['name'] == 'handover_to_operator':
+                    logger.info("Начало обработки функции handover_to_operator")
+                    # Получаем список всех админов
+                    logger.info("Получение списка админов...")
+                    admins = get_all_admin_ids()
+                    logger.info(f"Найдены админы: {admins}")
+                    
+                    if not admins:
+                        logger.warning("Список админов пуст")
+                        bot.send_message(message.chat.id, "К сожалению, сейчас нет доступных операторов. Попробуйте позже.")
+                        return
+                    
+                    # Добавляем пользователя в очередь
+                    logger.info("Добавление пользователя в очередь...")
+                    queue_position = stay_in_quire(message.chat.id)
+                    logger.info(f"Позиция в очереди: {queue_position}")
+                    if queue_position is None:
+                        logger.error("Ошибка при добавлении в очередь")
+                        bot.send_message(message.chat.id, "Произошла ошибка при добавлении в очередь. Пожалуйста, попробуйте позже.")
+                        return
+                    
+                    # Отправляем сообщение всем админам
+                    logger.info("Отправка уведомлений админам...")
+                    for admin_id in admins:
+                        try:
+                            markup = types.InlineKeyboardMarkup()
+                            button_agree = types.InlineKeyboardButton(
+                                '✅Подтвердить',
+                                callback_data=f'confirm_{message.chat.id}'
+                            )
+                            markup.add(button_agree)
+                            text = f'С вами хочет связаться пользователь {message.chat.username or message.chat.id}.'
+                            logger.info(f"Отправка сообщения админу {admin_id}")
+                            mes_id = bot.send_message(admin_id, text, reply_markup=markup)
+                            calling_admin[admin_id] = mes_id.message_id
+                            logger.info(f"Сообщение отправлено админу {admin_id}")
+                        except Exception as e:
+                            logger.error(f"Ошибка при отправке сообщения админу {admin_id}: {e}")
+                    
+                    # Отправляем пользователю сообщение о его позиции в очереди
+                    logger.info("Отправка сообщения пользователю...")
+                    text = 'Заявка отправлена администраторам, пожалуйста ожидайте. \n\nА пока можете послушать музыку:'
+                    markup = types.InlineKeyboardMarkup()
+                    button_text = 'Узнать положение в очереди'
+                    button_agree = types.InlineKeyboardButton(button_text, callback_data='queue_position')
+                    markup.add(button_agree)
+                    bot.send_message(message.chat.id, text, reply_markup=markup)
+                    
+                    # Воспроизводим музыку во время ожидания
+                    logger.info("Получение случайного музыкального трека...")
+                    music_path = get_random_music()
+                    if music_path:
+                        logger.info(f"Отправка аудиофайла: {music_path}")
+                        with open(music_path, 'rb') as audio_file:
+                            bot.send_audio(message.chat.id, audio_file)
+                    else:
+                        logger.warning("Музыкальные треки недоступны")
+                        bot.send_message(message.chat.id, "К сожалению, музыкальные треки временно недоступны")
+                    
+                    # Очищаем ресурсы ассистента после передачи оператору
+                    logger.info("Очистка ресурсов ассистента...")
+                    cleanup_assistant(message.chat.id)
+                    logger.info("Обработка запроса завершена успешно")
+                    return
+                else:
+                    logger.warning(f"Получен неожиданный вызов функции: {function_call['name']}")
+                    bot.send_message(message.chat.id, "Извините, произошла ошибка при обработке вашего запроса. Попробуйте позже.")
+                    return
+            elif isinstance(response, str):
+                logger.info(f"Получен текстовый ответ: {response}")
+                bot.send_message(message.chat.id, response)
+                return
+            else:
+                logger.error(f"Неожиданный формат ответа: {type(response)}")
+                bot.send_message(message.chat.id, "Извините, произошла ошибка при обработке вашего запроса. Попробуйте позже.")
+                return
+        except Exception as e:
+            logger.error(f"Ошибка при обработке запроса на передачу оператору: {str(e)}", exc_info=True)
+            bot.send_message(message.chat.id, "Произошла ошибка при обработке вашего запроса. Попробуйте позже.")
+            return
+    
     # Обработка обычных сообщений через ассистента
     try:
         assistant = get_or_create_assistant(message.chat.id)
         response = assistant.ask(message.text)
         
-        # Сохраняем сообщение и ответ в историю
-        if message.chat.id not in chat_history:
-            chat_history[message.chat.id] = []
-        chat_history[message.chat.id].append({
-            'user': message.text,
-            'assistant': response if isinstance(response, str) else "Вызов функции"
-        })
-        
-        if isinstance(response, dict) and 'function_call' in response:
-            function_call = response['function_call']
-            if function_call['name'] == 'handover_to_operator':
-                # Получаем список всех админов
-                admins = get_all_admin_ids()
-                logger.info(f"Найдены админы: {admins}")
-                
-                if not admins:
-                    bot.send_message(message.chat.id, "К сожалению, сейчас нет доступных операторов. Попробуйте позже.")
-                    return
-                
-                # Добавляем пользователя в очередь
-                queue_position = stay_in_quire(message.chat.id)
-                if queue_position is None:
-                    bot.send_message(message.chat.id, "Произошла ошибка при добавлении в очередь. Пожалуйста, попробуйте позже.")
-                    return
-                
-                # Отправляем сообщение всем админам
-                for admin_id in admins:
-                    try:
-                        markup = types.InlineKeyboardMarkup()
-                        button_agree = types.InlineKeyboardButton(
-                            '✅Подтвердить',
-                            callback_data=f'confirm_{message.chat.id}'
-                        )
-                        markup.add(button_agree)
-                        text = f'С вами хочет связаться пользователь {message.chat.username or message.chat.id}.'
-                        mes_id = bot.send_message(admin_id, text, reply_markup=markup)
-                        calling_admin[admin_id] = mes_id.message_id
-                        logger.info(f"Отправлено сообщение админу {admin_id}")
-                    except Exception as e:
-                        logger.error(f"Ошибка при отправке сообщения админу {admin_id}: {e}")
-                
-                # Отправляем пользователю сообщение о его позиции в очереди
-                text = 'Заявка отправлена администраторам, пожалуйста ожидайте. \n\nА пока можете послушать музыку:'
-                markup = types.InlineKeyboardMarkup()
-                button_text = 'Узнать положение в очереди'
-                button_agree = types.InlineKeyboardButton(button_text, callback_data='queue_position')
-                markup.add(button_agree)
-                bot.send_message(message.chat.id, text, reply_markup=markup)
-                
-                # Воспроизводим музыку во время ожидания
-                music_path = get_random_music()
-                if music_path:
-                    with open(music_path, 'rb') as audio_file:
-                        bot.send_audio(message.chat.id, audio_file)
-                else:
-                    bot.send_message(message.chat.id, "К сожалению, музыкальные треки временно недоступны")
-                    logger.warning("No music files available")
-                
-                # Очищаем ресурсы ассистента после передачи оператору
-                cleanup_assistant(message.chat.id)
+        if hasattr(response, 'function_call') and response.function_call.name == 'handover_to_operator':
+            # Получаем список всех админов
+            admins = get_all_admin_ids()
+            print(f"[DEBUG] Найдены админы: {admins}")
+            
+            if not admins:
+                bot.send_message(message.chat.id, "К сожалению, сейчас нет доступных операторов. Попробуйте позже.")
                 return
-                
+            
+            # Добавляем пользователя в очередь
+            queue_position = stay_in_quire(message.chat.id)
+            if queue_position is None:
+                bot.send_message(message.chat.id, "Произошла ошибка при добавлении в очередь. Пожалуйста, попробуйте позже.")
+                return
+            
+            # Отправляем сообщение всем админам
+            for admin_id in admins:
+                try:
+                    markup = types.InlineKeyboardMarkup()
+                    button_agree = types.InlineKeyboardButton(
+                        '✅Подтвердить',
+                        callback_data=f'confirm_{message.chat.id}'
+                    )
+                    markup.add(button_agree)
+                    text = f'С вами хочет связаться пользователь {message.chat.username or message.chat.id}.'
+                    mes_id = bot.send_message(admin_id, text, reply_markup=markup)
+                    calling_admin[admin_id] = mes_id.message_id
+                    print(f"[DEBUG] Отправлено сообщение админу {admin_id}")
+                except Exception as e:
+                    print(f"[ERROR] Ошибка при отправке сообщения админу {admin_id}: {e}")
+            
+            # Отправляем пользователю сообщение о его позиции в очереди
+            text = 'Заявка отправлена администраторам, пожалуйста ожидайте. \n\nА пока можете послушать музыку:'
+            markup = types.InlineKeyboardMarkup()
+            button_text = 'Узнать положение в очереди'
+            button_agree = types.InlineKeyboardButton(button_text, callback_data='queue_position')
+            markup.add(button_agree)
+            bot.send_message(message.chat.id, text, reply_markup=markup)
+            
+            # Воспроизводим музыку во время ожидания
+            music_path = get_random_music()
+            if music_path:
+                with open(music_path, 'rb') as audio_file:
+                    bot.send_audio(message.chat.id, audio_file)
+            else:
+                bot.send_message(message.chat.id, "К сожалению, музыкальные треки временно недоступны")
+                logger.warning("No music files available")
+            
+            # Очищаем ресурсы ассистента после передачи оператору
+            cleanup_assistant(message.chat.id)
+            return
+            
         elif response and response.strip():
             logger.info(f"Assistant response to user {message.chat.id}: {response}")
             bot.send_message(message.chat.id, response)
@@ -284,16 +364,6 @@ def handle_confirmation(call):
     # Создаем диалог
     result = create_dialog(admin_id, user_id)
     if result:
-        # Отправляем историю чата админу
-        if user_id in chat_history:
-            history_text = "История чата с пользователем:\n\n"
-            for msg in chat_history[user_id]:
-                history_text += f"Пользователь: {msg['user']}\n"
-                history_text += f"Ассистент: {msg['assistant']}\n\n"
-            bot.send_message(admin_id, history_text)
-            # Очищаем историю после отправки
-            del chat_history[user_id]
-        
         # Очищаем ассистента пользователя
         cleanup_assistant(user_id)
         
